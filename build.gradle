@@ -1,0 +1,162 @@
+defaultTasks 'generatePatchDescriptors'
+
+import java.util.jar.Manifest
+import java.util.regex.Pattern
+
+class Artifact {
+	
+	String group
+	String artifact
+	String version
+    String classifier
+    String extension
+    File file
+
+    def String toString() {
+        if (classifier) {
+           "mvn:${group}/${artifact}/${version}/${classifier}/${extension}"
+        } else {
+            "mvn:${group}/${artifact}/${version}"
+        }
+    }
+    
+    def filename() {
+        if (classifier) {
+           "${artifact}-${version}-${classifier}.${extension}"
+        } else {
+           "${artifact}-${version}.${extension}"
+        }
+    }
+    
+    def path(File repository) {
+      def relative_path = group.replaceAll("\\.", "/") + "/" + artifact + "/" + version + "/" + filename()
+      new File(repository, relative_path)
+    }
+ 
+}
+
+class Properties {
+
+   static File work = new File("target")
+   static File workRepo = new File(work, "repository")
+   static File workBundles = new File(work, "bundles")
+   static File workPatches = new File(work, "patches")
+
+   
+}
+
+task init << {
+    delete Properties.work
+    
+    Properties.workRepo.mkdirs()
+    Properties.workBundles.mkdirs()
+    Properties.workPatches.mkdirs()
+}
+
+task generateworkRepo(dependsOn: init) << {
+    println("Generating dummy patch JARs for ...")
+    repositoryContents(new File(jbossFuseHome, "system")) { artifact ->
+        if (artifact.extension == "jar" && artifact.version.contains("redhat")) {
+            println("... ${artifact}")
+            createPatchedVariant(artifact)
+
+        }
+    }
+}
+
+task generatePatchDescriptors(dependsOn: generateworkRepo) << {
+    createPatchFile("activemq") { it.group =~ /org\.apache\.activemq/ }
+    createPatchFile("camel") { it.group =~ /org\.apache\.camel/ }
+    createPatchFile("patch") { it.group =~ /org\.fusesource\.patch/ }
+    createPatchFile("fabric") { it.group =~ /io\.fabric8/ }
+    createPatchFile("fabric-zookeeper") { it.group =~ /io\.fabric8/ && it.artifact =~ /zookeeper/ }
+    createPatchFile("karaf") { it.group =~ /org\.apache\.karaf/ }
+    createPatchFile("hawtio") { it.group =~ /io\.hawt/ }
+    createPatchFile("sp1") { true /* select everything */ }
+}
+
+def createPatchFile(name, predicate) {
+    def patchDir = new File(Properties.workPatches, name)
+    def patchRepository = new File(patchDir, "repository")
+	patchRepository.mkdirs()    
+
+    println("Generating patch '${name}'")
+    
+    def list = []
+    repositoryContents(Properties.workRepo) { artifact ->
+        if (predicate(artifact)) {
+           list.add(artifact)
+           copy {
+              from artifact.file
+              into artifact.path(patchRepository).getParentFile()
+           }
+        }
+    }
+
+    new File(patchDir, "${name}.patch").withWriter { out ->
+      out.write("id=${name}-patch")
+      out.println()
+      out.write("bundle.count=${list.size()}")
+      out.println()
+      for (int i = 0; i < list.size(); i++) {
+        out.write("bundle.${i}=${list[i]}")
+        out.println()
+      }
+    }    
+    
+    def result = new File(Properties.workPatches, "${name}.zip")
+    ant.zip(destfile: result) {
+      fileset(dir: patchDir)
+    }
+    
+    println("... ${result} created with ${list.size()} bundles")
+}
+
+def createPatchedVariant(jar) {
+    def contents = new File(Properties.workBundles, jar.artifact)
+
+    copy {
+       from zipTree(jar.file)
+       into contents 
+    }    
+    
+    def manifestFile = new File(contents, "META-INF/MANIFEST.MF")
+    def input = new FileInputStream(manifestFile)
+    def manifest = new Manifest()
+    manifest.read(input)
+    
+    def version = manifest.getMainAttributes().getValue("Bundle-Version")
+    def new_version = version[0..-2] + 'X'
+
+    manifest.getMainAttributes().putValue("Bundle-Version", new_version)        
+    def exports = manifest.getMainAttributes().getValue("Export-Package")
+    
+    if (exports) {
+      manifest.getMainAttributes().putValue("Export-Package", 
+                                            exports.replaceAll(Pattern.quote(version), new_version))
+    }
+    manifest.write(new FileOutputStream(new File(contents, "META-INF/MANIFEST.MF")))
+    
+    jar.version = jar.version[0..-2] + 'X'
+    def result = jar.path(Properties.workRepo)
+
+    ant.jar(destfile: result, manifest: manifestFile) {
+        fileset(dir: contents)
+    }
+}
+
+def repositoryContents(dir, closure) {
+    dir.traverse() {
+        if (it.isFile()) {
+           def relname = it.getAbsolutePath().substring(dir.getAbsolutePath().length() as int)
+           def matcher = relname =~ /\/(.*)\/(.*)\/(.*)\/\2-\3-?(.*)?\.(.*)/
+           closure.call(
+                 new Artifact(group: matcher[0][1].replaceAll("\\/", "."),
+                              artifact: matcher[0][2],
+                              version: matcher[0][3],
+                              classifier: matcher[0][4],
+                              extension: matcher[0][5],
+                              file: it))
+           }
+    };
+}
