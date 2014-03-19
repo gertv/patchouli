@@ -15,6 +15,8 @@ class Artifact {
     def String toString() {
         if (classifier) {
            "mvn:${group}/${artifact}/${version}/${classifier}/${extension}"
+        } else if (extension != "jar") {
+            "mvn:${group}/${artifact}/${version}/${extension}"
         } else {
             "mvn:${group}/${artifact}/${version}"
         }
@@ -56,7 +58,7 @@ task init << {
 task generateworkRepo(dependsOn: init) << {
     println("Generating dummy patch JARs for ...")
     repositoryContents(new File(jbossFuseHome, "system")) { artifact ->
-        if (artifact.extension == "jar" && artifact.version.contains("redhat")) {
+        if ((artifact.extension == "jar" || artifact.extension == "war") && artifact.version.contains("redhat")) {
             println("... ${artifact}")
             createPatchedVariant(artifact)
 
